@@ -16,130 +16,207 @@ class MangaScraper:
             self.thread_local.conn.execute("PRAGMA journal_mode=WAL")
         return self.thread_local.conn
 
-    def update_manga_full(self, manga_id, updates):
+    def update_manga_full(self, manga_id, data: dict):
+        """
+        Updates manga/manga_sources data in the database for a given manga_id with the provided updates dictionary.
+        """
         conn = self.get_db_connection()
-        placeholders = ', '.join([f"{key}=?" for key in updates])
+        placeholders = ', '.join([f"{key}=?" for key in data.keys()])
         set_clause = ', '.join(placeholders)
         query = f"UPDATE manga SET {set_clause}, updated_at=CURRENT_TIMESTAMP WHERE id=?"
-        values = tuple([updates[key] for key in updates]) + (manga_id,)
+        values = tuple([data[key] for key in data.keys()]) + (manga_id,)
         conn.execute(query, values)
         conn.commit()
+        return True
 
-    def add_chapter(self, manga_site_id, chapter_number, chapter_url):
+    def add_chapter(self, manga_sources_id, data: dict):
+        """
+        Adds a chapter to the database if it doesn't already exist.
+        """
         conn = self.get_db_connection()
         query = """
-            INSERT OR IGNORE INTO chapter(manga_site_id, chapter_number, chapter_url) 
-            VALUES (?, ?, ?)
+            INSERT OR IGNORE INTO chapter(manga_sources_id, chapter_number, chapter_url, locked, locked_timer)
+            VALUES (?, ?, ?, ?, ?)
         """
-        conn.execute(query, (manga_site_id, chapter_number, chapter_url))
+        chapter_number = data.get('chapter_number', str(data.get('chapter_num', '')))
+        chapter_url = data.get('chapter_url', '')
+        locked = data.get('locked', False)
+        locked_timer = data.get('locked_timer', None)
+        conn.execute(query, (manga_sources_id, chapter_number, chapter_url, locked, locked_timer))
         conn.commit()
         return conn.lastrowid
 
-    def fetch_and_update_mangas(self):
+    def add_full_manga(self, data: dict):
+        """
+        Adds a manga and manga_sources to the database if it doesn't already exist, otherwise updates the existing manga entry.
+        Adds all details of the manga to the manga table and manga_sources table
+        Adds all chapters + alt_titles + authors + genres to their respective tables
+        """
         conn = self.get_db_connection()
-        mangas = self.get_all_manga(conn)
-        conn.close()
+        cursor = conn.cursor()
 
-        for manga in mangas:
-            if self.update_manga_data(manga['manga_url'], manga['site_id']):
-                self.process_chapters(manga['manga_url'], manga['id'], manga['site_id'])
+        # Extract data with defaults
+        title = data.get('title', '')
+        cover_url = data.get('cover_url', '')
+        summary = data.get('summary', '')
+        manga_url = data.get('manga_url', '')
+        site_id = data.get('site_id', None)
+        status = data.get('status', 'ongoing')
+        authors = data.get('authors', [])
+        genres = data.get('genres', [])
+        alt_titles = data.get('alt_titles', [])
 
-    def update_manga_data(self, url, site_id):
-        try:
-            response = requests.get(url)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Extract manga information (e.g., title, cover_url, summary, etc.)
-            manga_title = soup.find('h1', class_='title-name').text.strip()
-            cover_url = soup.find('img', class_='manga-poster')['src']
-            summary = ' '.join([p.text for p in soup.find('div', id='description-content').find_all('p')])
-            
-            updates = {
-                "title": manga_title,
-                "cover_url": cover_url,
-                "summary": summary
-            }
-            
-            conn = self.get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT id FROM manga WHERE manga_url=?", (url,))
-            result = cursor.fetchone()
-            
+        # Add manga to manga table
+        cursor.execute("""
+            INSERT OR REPLACE INTO manga (title, cover_url, summary)
+            VALUES (?, ?, ?)
+        """)
+        manga_id = cursor.lastrowid
+
+        if manga_url:
+            # update manga_sources entry if manga_url is provided
+            cursor.execute("""
+                UPDATE manga SET title=?, cover_url=?, summary=? WHERE id=?
+            """, (title, cover_url, summary, manga_id))
+
+        # Add manga_sources entry
+        if site_id:
+            cursor.execute("""
+                INSERT OR IGNORE INTO manga_sources (manga_id, site_id, manga_url, status)
+                VALUES (?, ?, ?, ?)
+            """, (manga_id, site_id, manga_url, status))
+            manga_sources_id = cursor.lastrowid
+
+        # Add alt_titles
+        for alt_title in alt_titles:
+            cursor.execute("""
+                INSERT OR IGNORE INTO alt_titles (manga_id, alt_title)
+                VALUES (?, ?)
+            """, (manga_id, alt_title))
+
+        # Add authors
+        for author in authors:
+            cursor.execute("""
+                INSERT OR IGNORE INTO authors (manga_id, author)
+                VALUES (?, ?)
+            """, (manga_id, author))
+
+        # Add genres
+        for genre in genres:
+            cursor.execute("""
+                INSERT OR IGNORE INTO genres (manga_id, genre)
+                VALUES (?, ?)
+            """, (manga_id, genre))
+
+        conn.commit()
+        return manga_id
+
+
+    def update_manga_data(self, url, data: dict = None):
+        """
+        Updates manga data in the database if it already exists, otherwise adds it as a new entry.
+        Makes sure any update is also reflected in the manga_sources table if any overlapping data is updated
+        """
+        pass
+
+    def add_chapters(self, manga_id, site_id, chapters_data: dict):
+        """
+        Adds chapters to the database for a given manga and site. Checks for duplicates before adding.
+        chapters_data should be a list of dicts with keys: chapter_number, chapter_url, chapter_title
+        """
+        manga_sources_id = self.get_manga_sources_id(manga_id, site_id)
+        if not manga_sources_id:
+            logging.error(f"No manga_sources found for manga_id={manga_id}, site_id={site_id}")
+            return False
+
+        conn = self.get_db_connection()
+        added_count = 0
+
+        for chapter in chapters_data:
+            result = self.add_chapter(manga_sources_id, chapter)
             if result:
-                manga_id = result[0]
-                self.update_manga_full(manga_id, updates)
-                return True
-            else:
-                # Add new manga to the database if not already present
-                pass
-        
-        except Exception as e:
-            logging.error(f"Error fetching {url}: {e}")
-        
-        return False
+                added_count += 1
 
-    def process_chapters(self, url, manga_id, site_id):
-        try:
-            response = requests.get(url)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            container = soup.find('div', id='manga-chapters-holder')
-            chapters = [(a['href'], a.text.strip()) for a in container.find_all('a', href=True)]
-            
-            for chapter_url, chapter_label in chapters:
-                manga_site_id = self.get_manga_site_id(manga_id, site_id)
-                if manga_site_id is None:
-                    manga_site_id = self.add_manga_site(manga_id, site_id, url)
-                self.add_chapter(manga_site_id, chapter_label, chapter_url)
-        
-        except Exception as e:
-            logging.error(f"Error processing chapters for {url}: {e}")
+        return added_count > 0
 
     def get_all_manga(self, conn):
         cursor = conn.execute("SELECT * FROM manga")
         return cursor.fetchall()
 
-    def get_manga_site_id(self, manga_id, site_id):
+    def get_manga_sources_id(self, manga_id, site_id):
         conn = self.get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM manga_site WHERE manga_id=? AND site_id=?", (manga_id, site_id))
+        cursor.execute("SELECT id FROM manga_sources WHERE manga_id=? AND site_id=?", (manga_id, site_id))
         result = cursor.fetchone()
         if result:
             return result[0]
         return None
 
-    def get_manga_site_id_by_url(self, manga_url):
+    def get_manga_sources_id_by_url(self, manga_url):
         conn = self.get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM manga_site WHERE manga_url=?", (manga_url,))
+        cursor.execute("SELECT id FROM manga_sources WHERE manga_url=?", (manga_url,))
         result = cursor.fetchone()
         if result:
             return result[0]
         return None
 
-    def add_site(self, site_name, base_url):
+    def add_site(self, data: dict):
+        """ Adds a new site to the database if it doesn't already exist, otherwise returns the existing site_id"""
+        site_name = data.get('domain', '')
+        base_url = data.get('url', '')
+
         print(site_name, base_url)  # Debugging statement to verify inputs
         conn = self.get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM site WHERE domain=?", (site_name,))
         result = cursor.fetchone()
-        
+
         if not result:
             query = "INSERT INTO site(domain, url) VALUES (?, ?)"
             conn.execute(query, (site_name, base_url))
             conn.commit()
+            return cursor.lastrowid
         else:
             return result[0]
 
-    def add_manga_site(self, manga_id, site_id, manga_url):
-        conn = self.get_db_connection()
-        query = """
-            INSERT INTO manga_site(manga_id, site_id, manga_url) 
-            VALUES (?, ?, ?)
+    def add_manga_sources(self, data: dict):
         """
-        conn.execute(query, (manga_id, site_id, manga_url))
-        conn.commit()
-        return conn.lastrowid
+        Adds a manga_sources entry to the database if it doesn't already exist, otherwise returns the existing id.
+        data dict should contain: manga_id, site_id, manga_url, status (optional)
+        """
+        manga_id = data.get('manga_id', None)
+        site_id = data.get('site_id', None)
+        manga_url = data.get('manga_url', '')
+        status = data.get('status', 'ongoing')
 
+        if not manga_id or not site_id:
+            logging.error("manga_id and site_id are required")
+            return None
+
+        conn = self.get_db_connection()
+        cursor = conn.cursor()
+
+        # Check if entry already exists
+        cursor.execute("""
+            SELECT id FROM manga_sources WHERE manga_id=? AND site_id=?
+        """, (manga_id, site_id))
+        existing = cursor.fetchone()
+
+        if existing:
+            # Update existing entry
+            cursor.execute("""
+                UPDATE manga_sources SET manga_url=?, status=?, updated_at=CURRENT_TIMESTAMP
+                WHERE manga_id=? AND site_id=?
+            """, (manga_url, status, manga_id, site_id))
+            conn.commit()
+            return existing[0]
+        else:
+            # Insert new entry
+            query = """
+                INSERT INTO manga_sources(manga_id, site_id, manga_url, status)
+                VALUES (?, ?, ?, ?)
+            """
+            cursor.execute(query, (manga_id, site_id, manga_url, status))
+            conn.commit()
+            return cursor.lastrowid
