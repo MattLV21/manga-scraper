@@ -1,9 +1,8 @@
-import requests
-from bs4 import BeautifulSoup
+import re
 import sqlite3
 from threading import local
-from tqdm import tqdm
 import logging
+from datetime import datetime, timedelta
 
 class MangaScraper:
     def __init__(self, database_path="manga.db"):
@@ -35,16 +34,132 @@ class MangaScraper:
         """
         conn = self.get_db_connection()
         query = """
-            INSERT OR IGNORE INTO chapter(manga_sources_id, chapter_number, chapter_url, locked, locked_timer)
+            INSERT OR IGNORE INTO chapter(manga_sources_id, chapter_number, chapter_url, locked, locked_until)
             VALUES (?, ?, ?, ?, ?)
         """
         chapter_number = data.get('chapter_number', str(data.get('chapter_num', '')))
         chapter_url = data.get('chapter_url', '')
         locked = data.get('locked', False)
-        locked_timer = data.get('locked_timer', None)
-        conn.execute(query, (manga_sources_id, chapter_number, chapter_url, locked, locked_timer))
+        locked_until = data.get('locked_until', None)
+        if locked and isinstance(locked_until, str):
+            locked_until = self._parse_duration_string(locked_until, datetime.now())
+        conn.execute(query, (manga_sources_id, chapter_number, chapter_url, locked, locked_until))
         conn.commit()
         return conn.lastrowid
+
+    def unlock_chapter(self, manga_sources_id, chapter_number):
+        """
+        Manually unlocks a chapter (sets locked=0).
+        Use check_and_unlock_chapters() instead for automatic unlocking.
+        Returns True if the chapter was unlocked, False otherwise.
+        """
+        conn = self.get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            UPDATE chapter SET locked=0, locked_until=NULL
+            WHERE manga_sources_id=? AND chapter_number=?
+        """, (manga_sources_id, chapter_number))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def check_and_unlock_chapters(self, manga_sources_id):
+        """
+        Checks all locked chapters and unlocks any that have expired.
+        Returns list of unlocked chapters.
+        """
+
+        conn = self.get_db_connection()
+        cursor = conn.cursor()
+
+        # Get all locked chapters with their unlock time
+        cursor.execute("""
+            SELECT chapter_number, locked_until FROM chapter
+            WHERE manga_sources_id=? AND locked=1 AND locked_until IS NOT NULL
+        """, (manga_sources_id,))
+        locked_chapters = cursor.fetchall()
+
+        now = datetime.now()
+        unlocked = []
+
+        for chapter_number, locked_until in locked_chapters:
+            if locked_until:
+                try:
+                    # Parse the stored timestamp
+                    unlock_time = datetime.strptime(locked_until, "%Y-%m-%d %H:%M:%S")
+
+                    if now >= unlock_time:
+                        # Chapter is ready to be unlocked
+                        cursor.execute("""
+                            UPDATE chapter SET locked=0, locked_until=NULL
+                            WHERE manga_sources_id=? AND chapter_number=?
+                        """, (manga_sources_id, chapter_number))
+                        conn.commit()
+                        unlocked.append(chapter_number)
+                except ValueError:
+                    # Invalid timestamp format, skip
+                    logging.error(f"Invalid locked_until format for manga_sources_id={manga_sources_id}, chapter_number={chapter_number}: {locked_until}")
+                    pass
+
+        return unlocked
+
+    def get_unlocked_chapters(self, manga_sources_id):
+        """
+        Gets all chapters that are unlocked (or locked with expired timer).
+        Returns list of (chapter_number, chapter_url) tuples.
+        """
+        conn = self.get_db_connection()
+        cursor = conn.cursor()
+
+        # Get chapters that are not locked
+        cursor.execute("""
+            SELECT chapter_number, chapter_url FROM chapter
+            WHERE manga_sources_id=? AND (locked=0 OR locked_until IS NULL)
+            ORDER BY chapter_number
+        """, (manga_sources_id,))
+        return cursor.fetchall()
+
+    def lock_chapter(self, manga_sources_id, chapter_number, unlock_time):
+        """
+        Locks a chapter until the specified unlock time.
+        unlock_time should be a datetime object or string in "YYYY-MM-DD HH:MM:SS" format.
+        """
+        now = datetime.now()
+        
+        conn = self.get_db_connection()
+        cursor = conn.cursor()
+
+        # Convert to datetime if it's a string
+        if isinstance(unlock_time, str):
+            unlock_time = self._parse_duration_string(unlock_time, now)
+   
+        if not isinstance(unlock_time, datetime):
+            logging.error("unlock_time must be a datetime object or a valid duration string")
+            return False
+        
+        if unlock_time < datetime.now():
+            logging.warning("unlock_time is in the past, chapter will be unlocked immediately")
+            unlock_time = now
+            return self.unlock_chapter(manga_sources_id, chapter_number)
+       
+        # Lock the chapter
+        cursor.execute("""
+            UPDATE chapter SET locked=1, locked_until=?
+            WHERE manga_sources_id=? AND chapter_number=?
+        """, (unlock_time.strftime("%Y-%m-%d %H:%M:%S"), manga_sources_id, chapter_number))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def _parse_duration_string(self, duration_str, now):   
+        match = re.match(r'(\d+(?:\.\d+)?)\s*h(?:ours?)?\s*(?:\s*,\s*)?\s*(\d+(?:\.\d+)?)\s*m(?:in(?:u+te?)?)?', duration_str)
+        if match:
+            hours = float(match.group(1)) or 0
+            minutes = float(match.group(2)) or 0
+            unlock_time = now + timedelta(hours=hours, minutes=minutes)
+            return unlock_time
+        
+        logging.error(f"Invalid duration format: {duration_str}")
+        return None
 
     def add_full_manga(self, data: dict):
         """

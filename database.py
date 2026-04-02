@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS chapter (
     chapter_number TEXT NOT NULL,                      -- Chapter number (TEXT to handle "20.5", etc.)
     chapter_url TEXT NOT NULL,                         -- URL to the chapter page
     locked BOOLEAN NOT NULL DEFAULT 0,                 -- Whether the chapter is locked behind a timer
-    locked_timer TEXT,                                -- Time remaining until the chapter unlocks (if locked)
+    locked_until TIMESTAMP,                            -- Absolute timestamp when the chapter unlocks (if locked)
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,    -- When the chapter was added
     FOREIGN KEY (manga_sources_id) REFERENCES manga_sources(id) ON DELETE CASCADE,
     UNIQUE(manga_sources_id, chapter_number)               -- Prevent duplicate chapters for a given manga and source
