@@ -74,6 +74,15 @@ CREATE TABLE IF NOT EXISTS authors (
 )
 """)
 
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS artists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    manga_id INTEGER NOT NULL,
+    artist TEXT NOT NULL,
+    FOREIGN KEY (manga_id) REFERENCES manga(id) ON DELETE CASCADE
+)
+""")
+
 # Genres table - stores genre tags for manga
 # Many-to-one relationship (one manga can have multiple genres)
 cursor.execute("""
