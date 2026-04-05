@@ -1,3 +1,4 @@
+from datetime import datetime
 import logging
 import time
 from bs4 import BeautifulSoup
@@ -11,21 +12,7 @@ class AsurascansScraper(MangaScraper):
         self.base_url = "https://asurascans.com/"
         self.base_latest = "?page="
         self.latest_page = self.base_url + self.base_latest
-        self.add_site({"domain": "Asurascans", "url": "https://asurascans.com/"})
-
-    def update_manga_data(self, manga_data):
-        """Update manga data from the database when available."""
-        conn = self.get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM manga WHERE manga_url=?", (manga_data["manga_url"],))
-        result = cursor.fetchone()
-        conn.close()
-
-        if result:
-            manga_id = result[0]
-            # Manga exists, skip update to keep scraping process unchanged
-            return True
-        return False
+        self.site_id = self.add_site({"domain": "Asurascans", "url": "https://asurascans.com/"})
 
     def fetch_latest_updates(self):
         """Fetch the latest manga updates from the website."""
@@ -46,6 +33,8 @@ class AsurascansScraper(MangaScraper):
 
             # Wait for the dynamic content to load
             page.wait_for_selector("div.grid")
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_load_state("networkidle", timeout=5000) # wait for the network to be idle, which means the page has finished loading
 
             soup = BeautifulSoup(page.content(), 'html.parser')
             container = soup.select_one("div.grid.grid-cols-1.md\\:grid-cols-2.content-start.px-4.md\\:px-8")
@@ -56,14 +45,27 @@ class AsurascansScraper(MangaScraper):
 
             # Each manga entry is a direct child div of the container
             items = container.find_all('div', recursive=False)
-            print(len(items))
             mangas = []
 
             for item in items:
                 manga_url = self.base_url + item.find('img').parent['href'][1:]
 
                 links = item.find_all('a', href=True)
-                chapters = [self.base_url + url['href'][1:] for url in links if "chapter" in url['href']]
+                chapters = []
+                for url in links:
+                    if "chapter" in url['href']:
+                        # Find chapter information and locks
+                        chapter_url = self.base_url + url['href'][1:]
+                        chapter_number = url['href'].split('/')[-1]
+                        locked = url.find('svg') is not None
+                        locked_timer = url.text.replace("Chapter "+chapter_number, "").strip() if locked else None
+                        chapter = {
+                            "url": chapter_url,
+                            "chapter_number": chapter_number,
+                            "locked": locked,
+                            "locked_timer": locked_timer
+                        }
+                        chapters.append(chapter)
 
                 manga_title = manga_url.split('/')[-1]
                 manga_title = manga_title.split('-')[:-1] # everything except the last part
@@ -88,12 +90,13 @@ class AsurascansScraper(MangaScraper):
 
             # Wait for the dynamic content to load
             # page.wait_for_selector("div.flex.flex-center")
-            time.sleep(1) # wait for 2 seconds to ensure content is loaded, can be optimized with better selectors
+            time.sleep(1)
 
             soup = BeautifulSoup(page.content(), 'html.parser')
 
             title = soup.select_one("meta[property='og:title']")['content'].split("|")[0].strip()
-            alt_titles = soup.select_one("p#alt-titles").text.strip().split(" • ")
+            alt_titles_el = soup.select_one("p#alt-titles")
+            alt_titles = alt_titles_el.get_text(strip=True).split(" • ") if alt_titles_el else []
             status = soup.select_one("span.capitalize").get_text(strip=True)
             manga_type = soup.select_one("span.uppercase").get_text(strip=True)
             links = soup.select("a")
@@ -104,6 +107,8 @@ class AsurascansScraper(MangaScraper):
 
             chapters = []
             genres = []
+            author = None
+            artist = None
 
             for link in links:
                 url = link['href']
@@ -111,7 +116,7 @@ class AsurascansScraper(MangaScraper):
                     author = url.split('=')[-1].replace("%20", " ") # only if one author ( need to check how url looks like if multiple authors )
                     continue
                 elif "artist" in url:
-                    author = url.split('=')[-1].replace("%20", " ") # only if one author ( need to check how url looks like if multiple authors )
+                    artist = url.split('=')[-1].replace("%20", " ") # only if one author ( need to check how url looks like if multiple authors )
                     continue
                 elif "genres" in url:
                     genre = url.split('=')[-1].replace("%20", " ") # only if one genre ( need to check how url looks like if multiple genres )
@@ -131,7 +136,13 @@ class AsurascansScraper(MangaScraper):
                                 locked_timer = locked_timer[:idx+1]
                                 break
                         locked_timer = " ".join(locked_timer)
-                    chapters.append((chapter_url, url.split('/')[-1], locked, locked_timer if locked else None))
+                    chapter = {
+                        "url": chapter_url,
+                        "chapter_number": url.split('/')[-1],
+                        "locked": locked,
+                        "locked_timer": locked_timer if locked else None
+                    }
+                    chapters.append(chapter)
 
             browser.close()
             
@@ -142,6 +153,7 @@ class AsurascansScraper(MangaScraper):
                 "status": status,
                 "type": manga_type,
                 "author": author,
+                "artist": artist,
                 "genres": genres,
                 "cover_url": cover_url,
                 "chapters": chapters,
@@ -153,41 +165,31 @@ class AsurascansScraper(MangaScraper):
 
     def scrape(self):
         latest_updates = self.fetch_latest_updates()
-        for update in latest_updates:
-            print(update)
 
         for update in tqdm(latest_updates, desc="Scraping Latest Updates"):
             manga_url = update['manga_url']
 
             # Check if manga already exists
-            conn = self.get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT id FROM manga WHERE manga_url=?", (manga_url,))
-            result = cursor.fetchone()
-
-            if not result:
+            sources_id = self.get_manga_sources_id_by_url(manga_url)
+            
+            if not sources_id:
                 # Add new manga to the database
                 updates = self.fetch_manga_details(manga_url)
-                manga_id = self.add_manga_full(updates)
-                site_id = self.get_manga_sources_id_by_url(manga_url)
-                self.add_manga_sources(manga_id, site_id, manga_url)
+                manga_id = self.add_full_manga(updates)
+            else:
+                manga_id = self.get_manga_id_by_source_id(sources_id)
 
-                # TODO - fetch manga details and add to database, currently only adds manga and manga_sources, but not chapters, authors, genres, alt_titles
+            # To insure that in case of new status
+            sources_id = self.add_manga_sources(self.site_id, manga_id, update)
 
-            # TODO - update chapters from updates
-            # and if a single update, fetch next page aswell to make sure we get all updates
+            # Update chapters
+            for chapter in update['chapter_info']:
+                self.add_chapter(sources_id, chapter)
 
             
             
 
 if __name__ == "__main__":
     scraper = AsurascansScraper()
-    # scraper.scrape()
-    result = scraper.fetch_manga_details("https://asurascans.com/comics/emperor-of-solo-play-26f76d6d")
-    for key, value in result.items():
-        # print if is chapter and chapter is locked
-        if key == "chapters":
-            for chapter in value:
-                chapter_url, chapter_label, locked, locked_timer = chapter
-                if locked:
-                    print(f"Chapter: {chapter_label}, URL: {chapter_url}, Locked: {locked}, Locked Timer: {locked_timer}")
+    scraper.scrape()
+    

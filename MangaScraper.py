@@ -33,19 +33,41 @@ class MangaScraper:
         Adds a chapter to the database if it doesn't already exist.
         """
         conn = self.get_db_connection()
+        
         query = """
-            INSERT OR IGNORE INTO chapter(manga_sources_id, chapter_number, chapter_url, locked, locked_until)
+            INSERT INTO chapter(manga_sources_id, chapter_number, chapter_url, locked, locked_until)
             VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(manga_sources_id, chapter_number) DO UPDATE SET
+                locked=excluded.locked,
+                locked_until=excluded.locked_until
         """
-        chapter_number = data.get('chapter_number', str(data.get('chapter_num', '')))
-        chapter_url = data.get('chapter_url', '')
+        chapter_number = data.get('chapter_number', data.get('chapter_number', ''))
+        chapter_url = data.get('url', '')
         locked = data.get('locked', False)
-        locked_until = data.get('locked_until', None)
+        locked_until = data.get('locked_timer', None)
+
+        if locked:
+            print(chapter_url, chapter_number, locked, locked_until)
+
+        # Convert duration string to datetime
         if locked and isinstance(locked_until, str):
-            locked_until = self._parse_duration_string(locked_until, datetime.now())
-        conn.execute(query, (manga_sources_id, chapter_number, chapter_url, locked, locked_until))
+            locked_until_dt = self._parse_duration_string(locked_until, datetime.now())
+            if locked_until_dt:
+                locked_until = locked_until_dt.strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                locked_until = None
+        elif isinstance(locked_until, datetime):
+            locked_until = locked_until.strftime("%Y-%m-%d %H:%M:%S")
+
+        result = conn.execute(query, (
+            manga_sources_id, 
+            chapter_number, 
+            chapter_url, 
+            locked, 
+            locked_until
+            ))
         conn.commit()
-        return conn.lastrowid
+        return result.lastrowid
 
     def unlock_chapter(self, manga_sources_id, chapter_number):
         """
@@ -137,7 +159,7 @@ class MangaScraper:
             logging.error("unlock_time must be a datetime object or a valid duration string")
             return False
         
-        if unlock_time < datetime.now():
+        if unlock_time <= datetime.now():
             logging.warning("unlock_time is in the past, chapter will be unlocked immediately")
             unlock_time = now
             return self.unlock_chapter(manga_sources_id, chapter_number)
@@ -151,10 +173,19 @@ class MangaScraper:
         return cursor.rowcount > 0
 
     def _parse_duration_string(self, duration_str, now):   
-        match = re.match(r'(\d+(?:\.\d+)?)\s*h(?:ours?)?\s*(?:\s*,\s*)?\s*(\d+(?:\.\d+)?)\s*m(?:in(?:u+te?)?)?', duration_str)
+        """
+        Parses a duration string into a datetime.
+        Accepts formats like:
+            "3h 42m", "5h 11m", "50m", "2h", "1h 0m"
+        """
+        duration_str = duration_str.strip().lower()
+        
+        # Regex: optional hours, mandatory minutes
+        match = re.match(r'(?:(\d+(?:\.\d+)?)\s*h(?:ours?)?\s*)?(?:(\d+(?:\.\d+)?)\s*m(?:in(?:ute?)?)?)$', duration_str)
+        
         if match:
-            hours = float(match.group(1)) or 0
-            minutes = float(match.group(2)) or 0
+            hours = float(match.group(1)) if match.group(1) else 0
+            minutes = float(match.group(2)) if match.group(2) else 0
             unlock_time = now + timedelta(hours=hours, minutes=minutes)
             return unlock_time
         
@@ -174,33 +205,16 @@ class MangaScraper:
         title = data.get('title', '')
         cover_url = data.get('cover_url', '')
         summary = data.get('summary', '')
-        manga_url = data.get('manga_url', '')
-        site_id = data.get('site_id', None)
-        status = data.get('status', 'ongoing')
         authors = data.get('authors', [])
         genres = data.get('genres', [])
         alt_titles = data.get('alt_titles', [])
 
         # Add manga to manga table
         cursor.execute("""
-            INSERT OR REPLACE INTO manga (title, cover_url, summary)
+            INSERT OR IGNORE INTO manga (title, cover_url, summary)
             VALUES (?, ?, ?)
-        """)
+        """, (title, cover_url, summary))
         manga_id = cursor.lastrowid
-
-        if manga_url:
-            # update manga_sources entry if manga_url is provided
-            cursor.execute("""
-                UPDATE manga SET title=?, cover_url=?, summary=? WHERE id=?
-            """, (title, cover_url, summary, manga_id))
-
-        # Add manga_sources entry
-        if site_id:
-            cursor.execute("""
-                INSERT OR IGNORE INTO manga_sources (manga_id, site_id, manga_url, status)
-                VALUES (?, ?, ?, ?)
-            """, (manga_id, site_id, manga_url, status))
-            manga_sources_id = cursor.lastrowid
 
         # Add alt_titles
         for alt_title in alt_titles:
@@ -276,6 +290,15 @@ class MangaScraper:
             return result[0]
         return None
 
+    def get_manga_id_by_source_id(self, source_id):
+        conn = self.get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT manga_id FROM manga_sources WHERE id=?", (source_id,))
+        result = cursor.fetchone()
+        if result:
+            return result[0]
+        return None
+
     def add_site(self, data: dict):
         """ Adds a new site to the database if it doesn't already exist, otherwise returns the existing site_id"""
         site_name = data.get('domain', '')
@@ -295,19 +318,13 @@ class MangaScraper:
         else:
             return result[0]
 
-    def add_manga_sources(self, data: dict):
+    def add_manga_sources(self, site_id, manga_id, data: dict):
         """
         Adds a manga_sources entry to the database if it doesn't already exist, otherwise returns the existing id.
         data dict should contain: manga_id, site_id, manga_url, status (optional)
         """
-        manga_id = data.get('manga_id', None)
-        site_id = data.get('site_id', None)
         manga_url = data.get('manga_url', '')
         status = data.get('status', 'ongoing')
-
-        if not manga_id or not site_id:
-            logging.error("manga_id and site_id are required")
-            return None
 
         conn = self.get_db_connection()
         cursor = conn.cursor()
@@ -324,6 +341,7 @@ class MangaScraper:
                 UPDATE manga_sources SET manga_url=?, status=?, updated_at=CURRENT_TIMESTAMP
                 WHERE manga_id=? AND site_id=?
             """, (manga_url, status, manga_id, site_id))
+            
             conn.commit()
             return existing[0]
         else:
