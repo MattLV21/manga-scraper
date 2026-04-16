@@ -32,7 +32,6 @@ class AsurascansScraper(MangaScraper):
             page.goto(self.latest_page + str(page_number))
 
             # Wait for the dynamic content to load
-            page.wait_for_selector("div.grid")
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             page.wait_for_load_state("networkidle", timeout=5000) # wait for the network to be idle, which means the page has finished loading
 
@@ -58,7 +57,15 @@ class AsurascansScraper(MangaScraper):
                         chapter_url = self.base_url + url['href'][1:]
                         chapter_number = url['href'].split('/')[-1]
                         locked = url.find('svg') is not None
-                        locked_timer = url.text.replace("Chapter "+chapter_number, "").strip() if locked else None
+                        if locked:
+                            locked_timer = url.text.replace("Chapter "+chapter_number, "").strip()
+
+                            if not locked_timer[0].isdigit():
+                                if ")" in locked_timer:
+                                    locked_timer = locked_timer.split(")")[1].strip()
+                        else:
+                            locked_timer = None
+
                         chapter = {
                             "url": chapter_url,
                             "chapter_number": chapter_number,
@@ -89,8 +96,7 @@ class AsurascansScraper(MangaScraper):
             page.goto(manga_url)
 
             # Wait for the dynamic content to load
-            # page.wait_for_selector("div.flex.flex-center")
-            time.sleep(1)
+            page.wait_for_load_state("networkidle", timeout=1000)
 
             soup = BeautifulSoup(page.content(), 'html.parser')
 
@@ -102,8 +108,10 @@ class AsurascansScraper(MangaScraper):
             links = soup.select("a")
             cover_url = soup.select_one("meta[property='og:image']")['content']
             summary = " ".join([p.text.strip() for p in soup.select("div#description-text p")]) # has a list of p elements, that need to join them together
-
-
+            
+            if summary == "":
+                print(title, manga_url)
+                summary = soup.select_one("div#description-text").text.strip()
 
             chapters = []
             genres = []
@@ -152,8 +160,8 @@ class AsurascansScraper(MangaScraper):
                 "alt_titles": alt_titles,
                 "status": status,
                 "type": manga_type,
-                "author": author,
-                "artist": artist,
+                "authors": [author] if author else [],
+                "artists": [artist] if artist else [],
                 "genres": genres,
                 "cover_url": cover_url,
                 "chapters": chapters,
@@ -184,10 +192,13 @@ class AsurascansScraper(MangaScraper):
 
             # Update chapters
             for chapter in update['chapter_info']:
-                self.add_chapter(sources_id, chapter)
+                result = self.add_chapter(sources_id, chapter)
+                
+                # since the oldest chapter was added make sure that a chapter wasn't skipped
+                if result and (chapter is update['chapter_info'][-1]):
+                    details = self.fetch_manga_details(manga_url)
+                    self.add_chapters(manga_id, self.site_id, details['chapters'])
 
-            
-            
 
 if __name__ == "__main__":
     scraper = AsurascansScraper()

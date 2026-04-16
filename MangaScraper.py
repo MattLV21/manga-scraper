@@ -46,9 +46,6 @@ class MangaScraper:
         locked = data.get('locked', False)
         locked_until = data.get('locked_timer', None)
 
-        if locked:
-            print(chapter_url, chapter_number, locked, locked_until)
-
         # Convert duration string to datetime
         if locked and isinstance(locked_until, str):
             locked_until_dt = self._parse_duration_string(locked_until, datetime.now())
@@ -206,9 +203,14 @@ class MangaScraper:
         cover_url = data.get('cover_url', '')
         summary = data.get('summary', '')
         authors = data.get('authors', [])
+        artists = data.get('artists', [])
         genres = data.get('genres', [])
         alt_titles = data.get('alt_titles', [])
 
+
+        # TODO, make sure that a manga with alt_title doesn't get added again as a new manga
+        # This can be done by checking if any of the alt_titles already exist in the database before adding a new manga.
+        
         # Add manga to manga table
         cursor.execute("""
             INSERT OR IGNORE INTO manga (title, cover_url, summary)
@@ -229,6 +231,12 @@ class MangaScraper:
                 INSERT OR IGNORE INTO authors (manga_id, author)
                 VALUES (?, ?)
             """, (manga_id, author))
+
+        for artist in artists:
+            cursor.execute("""
+                INSERT OR IGNORE INTO artists (manga_id, artist)
+                VALUES (?, ?)
+            """, (manga_id, artist))
 
         # Add genres
         for genre in genres:
@@ -303,8 +311,7 @@ class MangaScraper:
         """ Adds a new site to the database if it doesn't already exist, otherwise returns the existing site_id"""
         site_name = data.get('domain', '')
         base_url = data.get('url', '')
-
-        print(site_name, base_url)  # Debugging statement to verify inputs
+ # Debugging statement to verify inputs
         conn = self.get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM site WHERE domain=?", (site_name,))
