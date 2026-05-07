@@ -3,6 +3,7 @@ import sqlite3
 from threading import local
 import logging
 from datetime import datetime, timedelta
+from tqdm import tqdm
 
 class MangaScraper:
     def __init__(self, database_path="manga.db"):
@@ -94,7 +95,7 @@ class MangaScraper:
         # Get all locked chapters with their unlock time
         cursor.execute("""
             SELECT chapter_number, locked_until FROM chapter
-            WHERE manga_sources_id=? AND locked=1 AND locked_until IS NOT NULL
+            WHERE manga_sources_id=? AND locked=1
         """, (manga_sources_id,))
         locked_chapters = cursor.fetchall()
 
@@ -119,6 +120,10 @@ class MangaScraper:
                     # Invalid timestamp format, skip
                     logging.error(f"Invalid locked_until format for manga_sources_id={manga_sources_id}, chapter_number={chapter_number}: {locked_until}")
                     pass
+            else:
+                # TODO: Handle chapters that are locked without a valid locked_until since some sites do not provide a tiemr.
+                # This can be done by checking the chapter's locked status on the site again and unlocking it if it's no longer locked.
+                continue
 
         return unlocked
 
@@ -191,15 +196,15 @@ class MangaScraper:
 
     def add_full_manga(self, data: dict):
         """
-        Adds a manga and manga_sources to the database if it doesn't already exist, otherwise updates the existing manga entry.
-        Adds all details of the manga to the manga table and manga_sources table
-        Adds all chapters + alt_titles + authors + genres to their respective tables
+        Adds a manga and manga_sources to the database if it doesn't already exist, 
+        otherwise updates the existing manga entry.
         """
         conn = self.get_db_connection()
         cursor = conn.cursor()
 
         # Extract data with defaults
         title = data.get('title', '')
+        manga_type = data.get('type', None)
         cover_url = data.get('cover_url', '')
         summary = data.get('summary', '')
         authors = data.get('authors', [])
@@ -207,38 +212,67 @@ class MangaScraper:
         genres = data.get('genres', [])
         alt_titles = data.get('alt_titles', [])
 
+        manga_id = None
 
-        # TODO, make sure that a manga with alt_title doesn't get added again as a new manga
-        # This can be done by checking if any of the alt_titles already exist in the database before adding a new manga.
+        # Check primary title first
+        cursor.execute("SELECT id FROM manga WHERE title = ?", (title,))
+        result = cursor.fetchone()
         
-        # Add manga to manga table
-        cursor.execute("""
-            INSERT OR IGNORE INTO manga (title, cover_url, summary)
-            VALUES (?, ?, ?)
-        """, (title, cover_url, summary))
-        manga_id = cursor.lastrowid
+        if result:
+            manga_id = result[0]
+        else:
+            # Check if any of the provided alt_titles already exist in the alt_titles table
+            if alt_titles:
+                # Create a placeholders string like (?, ?, ?)
+                placeholders = ', '.join(['?'] * len(alt_titles))
+                query = f"SELECT manga_id FROM alt_titles WHERE alt_title IN ({placeholders})"
+                cursor.execute(query, alt_titles)
+                alt_result = cursor.fetchone()
+                if alt_result:
+                    manga_id = alt_result[0]
 
-        # Add alt_titles
-        for alt_title in alt_titles:
+        # 2. ADD OR UPDATE MANGA TABLE
+        if manga_id is None:
+            # Truly new manga
+            cursor.execute("""
+                INSERT INTO manga (title, type, cover_url, summary)
+                VALUES (?, ?, ?, ?)
+            """, (title, manga_type, cover_url, summary))
+            manga_id = cursor.lastrowid
+        else:
+            # Existing manga: Update metadata (optional, but keeps info fresh)
+            cursor.execute("""
+                UPDATE manga 
+                SET type = COALESCE(?, type),
+                    cover_url = COALESCE(?, cover_url), 
+                    summary = COALESCE(?, summary)
+                WHERE id = ?
+            """, (manga_type, cover_url, summary, manga_id))
+
+        # 3. ADD ALT_TITLES (Using INSERT OR IGNORE to prevent duplicates for this ID)
+        # Ensure the main title is also in alt_titles for easier searching later
+        all_titles = list(set(alt_titles + [title]))
+        for t in all_titles:
             cursor.execute("""
                 INSERT OR IGNORE INTO alt_titles (manga_id, alt_title)
                 VALUES (?, ?)
-            """, (manga_id, alt_title))
+            """, (manga_id, t))
 
-        # Add authors
+        # 4. ADD AUTHORS
         for author in authors:
             cursor.execute("""
                 INSERT OR IGNORE INTO authors (manga_id, author)
                 VALUES (?, ?)
             """, (manga_id, author))
 
+        # 5. ADD ARTISTS
         for artist in artists:
             cursor.execute("""
                 INSERT OR IGNORE INTO artists (manga_id, artist)
                 VALUES (?, ?)
             """, (manga_id, artist))
 
-        # Add genres
+        # 6. ADD GENRES
         for genre in genres:
             cursor.execute("""
                 INSERT OR IGNORE INTO genres (manga_id, genre)
@@ -360,3 +394,31 @@ class MangaScraper:
             cursor.execute(query, (manga_id, site_id, manga_url, status))
             conn.commit()
             return cursor.lastrowid
+    
+    def scrape(self):
+        latest_updates = self.fetch_latest_updates()
+
+        for update in tqdm(latest_updates, desc="Scraping Latest Updates"):
+            manga_url = update['manga_url']
+
+            # Check if manga already exists
+            sources_id = self.get_manga_sources_id_by_url(manga_url)
+            
+            if not sources_id:
+                # Add new manga to the database
+                updates = self.fetch_manga_details(manga_url)
+                manga_id = self.add_full_manga(updates)
+            else:
+                manga_id = self.get_manga_id_by_source_id(sources_id)
+
+            # To insure that in case of new status
+            sources_id = self.add_manga_sources(self.site_id, manga_id, update)
+
+            # Update chapters
+            for chapter in update['chapter_info']:
+                result = self.add_chapter(sources_id, chapter)
+                
+                # since the oldest chapter was added make sure that a chapter wasn't skipped
+                if result and (chapter is update['chapter_info'][-1]):
+                    details = self.fetch_manga_details(manga_url)
+                    self.add_chapters(manga_id, self.site_id, details['chapters'])

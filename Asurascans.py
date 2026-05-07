@@ -4,14 +4,12 @@ import time
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 from MangaScraper import MangaScraper
-from tqdm import tqdm
 
 class AsurascansScraper(MangaScraper):
     def __init__(self, database_path="manga.db"):
         super().__init__(database_path)
         self.base_url = "https://asurascans.com/"
         self.base_latest = "?page="
-        self.latest_page = self.base_url + self.base_latest
         self.site_id = self.add_site({"domain": "Asurascans", "url": "https://asurascans.com/"})
 
     def fetch_latest_updates(self):
@@ -29,7 +27,7 @@ class AsurascansScraper(MangaScraper):
             page = browser.new_page()
 
             # Navigate to the URL
-            page.goto(self.latest_page + str(page_number))
+            page.goto(self.base_url + self.base_latest + str(page_number))
 
             # Wait for the dynamic content to load
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -171,33 +169,7 @@ class AsurascansScraper(MangaScraper):
 
             return updates
 
-    def scrape(self):
-        latest_updates = self.fetch_latest_updates()
 
-        for update in tqdm(latest_updates, desc="Scraping Latest Updates"):
-            manga_url = update['manga_url']
-
-            # Check if manga already exists
-            sources_id = self.get_manga_sources_id_by_url(manga_url)
-            
-            if not sources_id:
-                # Add new manga to the database
-                updates = self.fetch_manga_details(manga_url)
-                manga_id = self.add_full_manga(updates)
-            else:
-                manga_id = self.get_manga_id_by_source_id(sources_id)
-
-            # To insure that in case of new status
-            sources_id = self.add_manga_sources(self.site_id, manga_id, update)
-
-            # Update chapters
-            for chapter in update['chapter_info']:
-                result = self.add_chapter(sources_id, chapter)
-                
-                # since the oldest chapter was added make sure that a chapter wasn't skipped
-                if result and (chapter is update['chapter_info'][-1]):
-                    details = self.fetch_manga_details(manga_url)
-                    self.add_chapters(manga_id, self.site_id, details['chapters'])
 
 
 if __name__ == "__main__":

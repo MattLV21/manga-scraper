@@ -23,6 +23,7 @@ cursor.execute("""
 CREATE TABLE IF NOT EXISTS manga (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL UNIQUE,                        -- Manga title (unique to prevent duplicates)
+    type TEXT,                                      -- Manga type (e.g., manga, manhwa, manhua)
     cover_url TEXT,                                    -- URL to the cover image
     summary TEXT,                                    -- Summary specific to this site (if different from main manga summary)
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,    -- When the manga was first added
@@ -70,7 +71,8 @@ CREATE TABLE IF NOT EXISTS authors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     manga_id INTEGER NOT NULL,
     author TEXT NOT NULL,
-    FOREIGN KEY (manga_id) REFERENCES manga(id) ON DELETE CASCADE
+    FOREIGN KEY (manga_id) REFERENCES manga(id) ON DELETE CASCADE,
+    UNIQUE (manga_id, author)
 )
 """)
 
@@ -79,29 +81,28 @@ CREATE TABLE IF NOT EXISTS artists (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     manga_id INTEGER NOT NULL,
     artist TEXT NOT NULL,
-    FOREIGN KEY (manga_id) REFERENCES manga(id) ON DELETE CASCADE
+    FOREIGN KEY (manga_id) REFERENCES manga(id) ON DELETE CASCADE,
+    UNIQUE (manga_id, artist)
 )
 """)
 
-# Genres table - stores genre tags for manga
-# Many-to-one relationship (one manga can have multiple genres)
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS genres (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     manga_id INTEGER NOT NULL,
     genre TEXT NOT NULL,
-    FOREIGN KEY (manga_id) REFERENCES manga(id) ON DELETE CASCADE
+    FOREIGN KEY (manga_id) REFERENCES manga(id) ON DELETE CASCADE,
+    UNIQUE (manga_id, genre)
 )
 """)
 
-# Alternative titles table - stores other names the manga is known by
-# Many-to-one relationship with manga (one manga can have multiple alt titles)
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS alt_titles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     manga_id INTEGER NOT NULL,
     alt_title TEXT NOT NULL,
-    FOREIGN KEY (manga_id) REFERENCES manga(id) ON DELETE CASCADE
+    FOREIGN KEY (manga_id) REFERENCES manga(id) ON DELETE CASCADE,
+    UNIQUE (manga_id, alt_title)
 )
 """)
 
