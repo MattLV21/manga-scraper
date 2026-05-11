@@ -54,7 +54,7 @@ cursor.execute("""
 CREATE TABLE IF NOT EXISTS chapter (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     manga_sources_id INTEGER NOT NULL,
-    chapter_number TEXT NOT NULL,                      -- Chapter number (TEXT to handle "20.5", etc.)
+    chapter_number REAL NOT NULL,                      -- Chapter number (TEXT to handle "20.5", etc.)
     chapter_url TEXT NOT NULL,                         -- URL to the chapter page
     locked BOOLEAN NOT NULL DEFAULT 0,                 -- Whether the chapter is locked behind a timer
     locked_until TIMESTAMP,                            -- Absolute timestamp when the chapter unlocks (if locked)

@@ -3,12 +3,33 @@ import sqlite3
 from threading import local
 import logging
 from datetime import datetime, timedelta
+from playwright.sync_api import sync_playwright
 from tqdm import tqdm
 
 class MangaScraper:
     def __init__(self, database_path="manga.db"):
         self.database_path = database_path
         self.thread_local = local()
+        self.browser = None
+        self.page = None
+
+    def _get_browser(self):
+        """Get or create browser instance."""
+        if self.browser is None:
+            self.playwright = sync_playwright().start()
+            self.browser = self.playwright.chromium.launch(headless=True)
+            self.context = self.browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            self.page = self.context.new_page()
+
+        return self.browser, self.page
+
+    def _close_browser(self):
+        """Close browser on destruction."""
+        if self.browser:
+            self.browser.close()
+        if getattr(self, "playwright", None):
+            self.playwright.stop()
+
 
     def get_db_connection(self):
         if not hasattr(self.thread_local, 'conn'):
@@ -396,7 +417,17 @@ class MangaScraper:
             return cursor.lastrowid
     
     def scrape(self):
+
+        browser, page = self._get_browser()
         latest_updates = self.fetch_latest_updates()
+
+        db_changes = {
+            "manga_added": 0,
+            "manga_updated": 0,
+            "sources_updated": 0,
+            "chapters_added": 0,
+            "chapters_backfilled": 0
+        }
 
         for update in tqdm(latest_updates, desc="Scraping Latest Updates"):
             manga_url = update['manga_url']
@@ -408,17 +439,45 @@ class MangaScraper:
                 # Add new manga to the database
                 updates = self.fetch_manga_details(manga_url)
                 manga_id = self.add_full_manga(updates)
+                db_changes["manga_added"] += 1
             else:
                 manga_id = self.get_manga_id_by_source_id(sources_id)
 
             # To insure that in case of new status
             sources_id = self.add_manga_sources(self.site_id, manga_id, update)
+            db_changes["sources_updated"] += 1
+
+            update['chapter_info'] = sorted(
+                update['chapter_info'],
+                key=lambda c: float(c.get("chapter_number", 0)),
+                reverse=True
+            )
+
+            need_backfill = False
 
             # Update chapters
-            for chapter in update['chapter_info']:
+            for idx, chapter in enumerate(update['chapter_info']):
                 result = self.add_chapter(sources_id, chapter)
                 
-                # since the oldest chapter was added make sure that a chapter wasn't skipped
-                if result and (chapter is update['chapter_info'][-1]):
-                    details = self.fetch_manga_details(manga_url)
-                    self.add_chapters(manga_id, self.site_id, details['chapters'])
+                if result:
+                    db_changes["chapters_added"] += 1
+
+                if result and idx == len(update['chapter_info']) - 1:
+                    need_backfill = True
+
+            # since the oldest chapter was added make sure that a chapter wasn't skipped
+            if need_backfill:
+                details = self.fetch_manga_details(manga_url)
+
+                details['chapters'] = sorted(
+                    details['chapters'],
+                    key=lambda c: float(c.get("chapter_number", 0)),
+                    reverse=True
+                )
+
+                self.add_chapters(manga_id, self.site_id, details['chapters'])
+
+                db_changes["chapters_backfilled"] += 1
+                
+        # TODO: return the amount of changes that were made to the database for logging and debugging purposes
+        self._close_browser()
