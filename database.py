@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS manga_sources (
     manga_id INTEGER NOT NULL,
     site_id INTEGER NOT NULL,
     manga_url TEXT NOT NULL,                           -- URL to the manga's page on the specific site
-    status TEXT CHECK(status IN ('ongoing', 'completed', 'hiatus', 'dropped')),
+    status TEXT NOT NULL,                                   -- Status of the manga on this site (e.g., ongoing, completed)
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,    -- When the manga was last updated for this source
     FOREIGN KEY (manga_id) REFERENCES manga(id) ON DELETE CASCADE,
