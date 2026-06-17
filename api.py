@@ -190,27 +190,33 @@ async def list_mangas():
     return mangas
 
 
-@app.get("/manga/latest", response_model=List[MangaResponse], tags=["Manga"])
-async def get_latest_manga(limit: int = Query(10, ge=1, le=100, description="Number of latest updated mangas to fetch")):
-    """
-    Get the $n$ latest updated mangas based on the modification timestamp (`updated_at`).
-    """
+@app.get("/manga/latest", tags=["Manga"]) # Swapped response_model to handle the extra calculated keys dynamically
+async def get_latest_mangas(limit: int = 24, offset: int = 0):
     conn = get_db_connection()
+    conn.row_factory = sqlite3.Row # Allows dictionary access by column names
     cursor = conn.cursor()
     
+    # Updated SQL to look up the latest chapter values directly inside sqlite
     cursor.execute("""
-        SELECT id, title, type, cover_url, summary, created_at, updated_at
-        FROM manga
-        ORDER BY updated_at DESC
-        LIMIT ?
-    """, (limit,))
+        SELECT 
+            m.id, m.title, m.type, m.cover_url, m.summary, m.created_at, m.updated_at,
+            c.chapter_number,
+            ms.site_id,
+            c.locked,
+            c.locked_until
+        FROM manga m
+        LEFT JOIN manga_sources ms ON m.id = ms.manga_id
+        LEFT JOIN chapter c ON ms.id = c.manga_sources_id
+        GROUP BY m.id
+        ORDER BY m.updated_at DESC 
+        LIMIT ? OFFSET ?
+    """, (limit, offset))
     
-    columns = [description[0] for description in cursor.description]
     rows = cursor.fetchall()
     conn.close()
     
-    return [{column: value for column, value in zip(columns, row)} for row in rows]
-
+    # Turn SQL row objects into clean JSON dictionaries
+    return [dict(row) for row in rows]
 
 @app.get("/manga/newest", response_model=List[MangaResponse], tags=["Manga"])
 async def get_newest_manga(limit: int = Query(10, ge=1, le=100, description="Number of newest created mangas to fetch")):
@@ -235,7 +241,10 @@ async def get_newest_manga(limit: int = Query(10, ge=1, le=100, description="Num
 
 
 @app.get("/manga/sources/latest", response_model=List[LatestSourceResponse], tags=["Manga"])
-async def get_latest_sources(limit: int = Query(10, ge=1, le=100, description="Number of latest updated manga sources to fetch")):
+async def get_latest_sources(
+    limit: int = Query(10, ge=1, le=100, description="Number of latest updated manga sources to fetch"),
+    offset: int = Query(0, ge=0)
+):
     """
     Get the $n$ latest updated manga sources. Useful to identify which specific mirror/site updated recently.
     """
@@ -249,6 +258,8 @@ async def get_latest_sources(limit: int = Query(10, ge=1, le=100, description="N
             m.title, 
             ms.site_id, 
             s.domain, 
+            ms.locked,
+            ms.locked_until,
             ms.manga_url, 
             ms.status, 
             ms.updated_at
@@ -256,8 +267,8 @@ async def get_latest_sources(limit: int = Query(10, ge=1, le=100, description="N
         JOIN manga m ON ms.manga_id = m.id
         JOIN site s ON ms.site_id = s.id
         ORDER BY ms.updated_at DESC
-        LIMIT ?
-    """, (limit,))
+        LIMIT ? OFFSET ?
+    """, (limit, offset))
     
     rows = cursor.fetchall()
     conn.close()
