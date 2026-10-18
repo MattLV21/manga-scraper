@@ -27,6 +27,7 @@ A manga reading application with web scraping capabilities.
 ### Backend
 ```bash
 pip install -r requirements.txt
+python3 main.py # Waring might not work depending on sites
 uvicorn api:app --reload
 ```
 
